@@ -1,5 +1,6 @@
 const std = @import("std");
 const uvBuild = @import("lib/zig-libuv-bindings/build.zig");
+const v8Build = @import("lib/zig-v8/build.zig");
 
 inline fn thisDir() []const u8 {
     return comptime std.fs.path.dirname(@src().file) orelse @panic("error");
@@ -80,7 +81,18 @@ pub fn build(b: *std.Build) !void {
 
     _ = try uvBuild.link(b, exe);
 
-    exe.addModule("zig-libuv-bindings", uv);
+    exe.addModule("zig-libuv", uv);
+
+    const v8 = b.createModule(.{
+        .source_file = .{ .path = thisDir() ++ "/lib/zig-v8/src/v8.zig" },
+        .dependencies = &.{},
+    });
+
+    exe.addIncludePath(.{ .path = thisDir() ++ "/lib/zig-v8/src" });
+
+    v8Build.linkV8(b, exe, false);
+
+    exe.addModule("zig-v8", v8);
 
     b.installArtifact(exe);
 }
