@@ -38,13 +38,29 @@ pub fn main() !void {
     hscope.init(isolate);
     defer hscope.deinit();
 
+    const Wrapper = struct {
+        pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
+            _ = raw_info;
+            std.debug.print("Hello zig node\n", .{});
+        }
+    };
+
+    const global_constructor = isolate.initFunctionTemplateDefault();
+
+    var ft = v8.FunctionTemplate.initCallbackData(isolate, Wrapper.callback, isolate.initExternal(&.{}));
+
+    var key = v8.String.initUtf8(isolate, "print");
+
+    var global = v8.ObjectTemplate.init(isolate, global_constructor);
+    global.set(key, ft, v8.PropertyAttribute.ReadOnly);
+
     // Create a new context.
-    var context = v8.Context.init(isolate, null, null);
+    var context = v8.Context.init(isolate, global, null);
     context.enter();
     defer context.exit();
 
     // Create a string containing the JavaScript source code.
-    const source = v8.String.initUtf8(isolate, "'Hello' + ', World! 🍏🍓' + Math.sin(Math.PI/2)");
+    const source = v8.String.initUtf8(isolate, "'Hello' + ', World! 🍏🍓' + Math.sin(Math.PI/2) + print()");
 
     // Compile the source code.
     const script = try v8.Script.compile(context, source, null);
