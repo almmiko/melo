@@ -3,13 +3,13 @@ const uv = @import("zig-libuv");
 const v8 = @import("zig-v8");
 
 pub fn main() !void {
-    const alloc = std.heap.c_allocator;
-
-    const loop = try uv.Loop.init(alloc);
-    defer loop.deinit(alloc);
-
-    const timer = try uv.Timer.init(alloc, loop);
-    defer timer.deinit(alloc);
+    // const alloc = std.heap.c_allocator;
+    //
+    // const loop = try uv.Loop.init(alloc);
+    // defer loop.deinit(alloc);
+    //
+    // const timer = try uv.Timer.init(alloc, loop);
+    // defer timer.deinit(alloc);
 
     const platform = v8.Platform.initDefault(0, true);
     defer platform.deinit();
@@ -40,8 +40,22 @@ pub fn main() !void {
 
     const Wrapper = struct {
         pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
-            _ = raw_info;
-            std.debug.print("Hello zig node\n", .{});
+            const info = v8.FunctionCallbackInfo.initFromV8(raw_info);
+
+            var data = info.getData().castTo(v8.String);
+
+            var context = v8.Context.init(info.getIsolate(), null, null);
+            context.enter();
+            defer context.exit();
+
+            var s = info.getArg(0).toString(context) catch unreachable;
+
+            const len = data.lenUtf8(info.getIsolate());
+            var buf = std.heap.c_allocator.alloc(u8, len) catch unreachable;
+
+            _ = v8.String.writeUtf8(s, info.getIsolate(), buf);
+
+            std.debug.print("{s} Hello zig node\n", .{buf});
         }
     };
 
@@ -60,7 +74,7 @@ pub fn main() !void {
     defer context.exit();
 
     // Create a string containing the JavaScript source code.
-    const source = v8.String.initUtf8(isolate, "'Hello' + ', World! 🍏🍓' + Math.sin(Math.PI/2) + print()");
+    const source = v8.String.initUtf8(isolate, "'Hello' + ', World! 🍏🍓' + Math.sin(Math.PI/2) + print('some')");
 
     // Compile the source code.
     const script = try v8.Script.compile(context, source, null);
@@ -73,14 +87,14 @@ pub fn main() !void {
 
     std.debug.print("{s}\n", .{res});
 
-    try timer.start((struct {
-        fn cb(t: *uv.Timer) void {
-            _ = t;
-            std.debug.print("hello from c lib \n", .{});
-        }
-    }).cb, 200, 1000);
-
-    try loop.run(.default);
+    // try timer.start((struct {
+    //     fn cb(t: *uv.Timer) void {
+    //         _ = t;
+    //         std.debug.print("hello from c lib \n", .{});
+    //     }
+    // }).cb, 200, 1000);
+    //
+    // try loop.run(.default);
 }
 
 pub fn valueToRawUtf8Alloc(alloc: std.mem.Allocator, isolate: v8.Isolate, ctx: v8.Context, val: v8.Value) []const u8 {
