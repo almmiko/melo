@@ -59,14 +59,35 @@ pub fn main() !void {
         }
     };
 
+    const Timeout = struct {
+        pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
+            std.debug.print("timeout\n", .{});
+
+            const info = v8.FunctionCallbackInfo.initFromV8(raw_info);
+
+            // Create a new context.
+            var context = v8.Context.init(info.getIsolate(), null, null);
+            context.enter();
+            defer context.exit();
+
+            var cb = info.getArg(0).castTo(v8.Function);
+            var delay = info.getArg(1).toU32(context);
+
+            std.debug.print("{any}\n", .{delay});
+
+            _ = cb.call(context, v8.Object.init(info.getIsolate()).toValue(), &.{});
+        }
+    };
+
     const global_constructor = isolate.initFunctionTemplateDefault();
 
     var ft = v8.FunctionTemplate.initCallbackData(isolate, Wrapper.callback, isolate.initExternal(&.{}));
-
-    var key = v8.String.initUtf8(isolate, "print");
+    var timeoutFunction = v8.FunctionTemplate.initCallbackData(isolate, Timeout.callback, isolate.initExternal(&.{}));
 
     var global = v8.ObjectTemplate.init(isolate, global_constructor);
-    global.set(key, ft, v8.PropertyAttribute.ReadOnly);
+
+    global.set(v8.String.initUtf8(isolate, "print"), ft, v8.PropertyAttribute.ReadOnly);
+    global.set(v8.String.initUtf8(isolate, "timeout"), timeoutFunction, v8.PropertyAttribute.ReadOnly);
 
     // Create a new context.
     var context = v8.Context.init(isolate, global, null);
@@ -74,7 +95,8 @@ pub fn main() !void {
     defer context.exit();
 
     // Create a string containing the JavaScript source code.
-    const source = v8.String.initUtf8(isolate, "'Hello' + ', World! 🍏🍓' + Math.sin(Math.PI/2) + print('some')");
+    // const source = v8.String.initUtf8(isolate, "'Hello, World! 🍏🍓' + Math.sin(Math.PI/2); print('some'); timeout()");
+    const source = v8.String.initUtf8(isolate, "function test() { print('some'); timeout(function() { print('from timeout'); }, 1000); }; test()");
 
     // Compile the source code.
     const script = try v8.Script.compile(context, source, null);
