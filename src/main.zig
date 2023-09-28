@@ -106,7 +106,18 @@ pub fn main() !void {
 
     // Create a string containing the JavaScript source code.
     // const source = v8.String.initUtf8(isolate, "'Hello, World! 🍏🍓' + Math.sin(Math.PI/2); print('some'); timeout()");
-    const source = v8.String.initUtf8(isolate, "function test() { print('some'); timeout(function() { print('from timeout'); }, 3000); }; test()");
+    const scriptString =
+        \\function test() { 
+        \\      print('some'); 
+        \\      timeout(function() { 
+        \\          print('from timeout');
+        \\      }, 3000);
+        \\};
+        \\
+        \\test();
+        \\
+    ;
+    const source = v8.String.initUtf8(isolate, scriptString);
 
     // Compile the source code.
     const script = try v8.Script.compile(context, source, null);
