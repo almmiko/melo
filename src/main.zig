@@ -5,13 +5,15 @@ const v8 = @import("zig-v8");
 var loop: uv.Loop = undefined;
 var timer: uv.Timer = undefined;
 
+const CallbackData = struct { context: v8.Context, isolate: v8.Isolate, callback: v8.Function };
+
+var context: v8.Context = undefined;
+
 pub fn main() !void {
     const alloc = std.heap.c_allocator;
 
     loop = try uv.Loop.init(alloc);
     defer loop.deinit(alloc);
-
-    timer = try uv.Timer.init(alloc, loop);
     defer timer.deinit(alloc);
 
     const platform = v8.Platform.initDefault(0, true);
@@ -47,10 +49,6 @@ pub fn main() !void {
 
             var data = info.getData().castTo(v8.String);
 
-            var context = v8.Context.init(info.getIsolate(), null, null);
-            context.enter();
-            defer context.exit();
-
             var s = info.getArg(0).toString(context) catch unreachable;
 
             const len = data.lenUtf8(info.getIsolate());
@@ -58,34 +56,31 @@ pub fn main() !void {
 
             _ = v8.String.writeUtf8(s, info.getIsolate(), buf);
 
-            std.debug.print("{s} Hello zig node\n", .{buf});
+            std.debug.print("{s}\n", .{buf});
         }
     };
 
     const Timeout = struct {
         pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
-            std.debug.print("timeout\n", .{});
+            //std.debug.print("timeout call\n", .{});
 
             const info = v8.FunctionCallbackInfo.initFromV8(raw_info);
-
-            // Create a new context.
-            var context = v8.Context.init(info.getIsolate(), null, null);
-            context.enter();
-            defer context.exit();
 
             var cb = info.getArg(0).castTo(v8.Function);
             var delay = info.getArg(1).toU32(context) catch unreachable;
 
-            std.debug.print("{any}\n", .{delay});
+            timer = uv.Timer.init(alloc, loop) catch unreachable;
+
+            var dptr: CallbackData = .{ .context = context, .isolate = info.getIsolate(), .callback = cb };
+
+            timer.setData(&dptr);
 
             timer.start((struct {
                 fn cbTimer(t: *uv.Timer) void {
-                    _ = t;
-                    std.debug.print("hello from c lib \n", .{});
+                    var data = t.getData(CallbackData).?.*;
+                    _ = data.callback.call(data.context, v8.Object.init(data.isolate).toValue(), &.{});
                 }
             }).cbTimer, @intCast(delay), 0) catch unreachable;
-
-            _ = cb.call(context, v8.Object.init(info.getIsolate()).toValue(), &.{});
         }
     };
 
@@ -100,18 +95,20 @@ pub fn main() !void {
     global.set(v8.String.initUtf8(isolate, "timeout"), timeoutFunction, v8.PropertyAttribute.ReadOnly);
 
     // Create a new context.
-    var context = v8.Context.init(isolate, global, null);
+    context = v8.Context.init(isolate, global, null);
     context.enter();
     defer context.exit();
 
     // Create a string containing the JavaScript source code.
-    // const source = v8.String.initUtf8(isolate, "'Hello, World! 🍏🍓' + Math.sin(Math.PI/2); print('some'); timeout()");
     const scriptString =
         \\function test() { 
         \\      print('some'); 
         \\      timeout(function() { 
         \\          print('from timeout');
-        \\      }, 3000);
+        \\          timeout(function() { 
+        \\              print('from timeout 2');
+        \\          }, 3000);
+        \\      }, 1000);
         \\};
         \\
         \\test();
@@ -123,20 +120,13 @@ pub fn main() !void {
     const script = try v8.Script.compile(context, source, null);
 
     // Run the script to get the result.
-    const value = try script.run(context);
+    _ = try script.run(context);
 
     // Convert the result to an UTF8 string and print it.
-    const res = valueToRawUtf8Alloc(std.heap.c_allocator, isolate, context, value);
+    //const res = valueToRawUtf8Alloc(std.heap.c_allocator, isolate, context, value);
 
-    std.debug.print("{s}\n", .{res});
+    //std.debug.print("{s}\n", .{res});
 
-    // try timer.start((struct {
-    //     fn cb(t: *uv.Timer) void {
-    //         _ = t;
-    //         std.debug.print("hello from c lib \n", .{});
-    //     }
-    // }).cb, 200, 1000);
-    //
     try loop.run(.default);
 }
 
