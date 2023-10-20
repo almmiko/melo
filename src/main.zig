@@ -1,25 +1,33 @@
 const std = @import("std");
-const uv = @import("zig-libuv");
 const v8 = @import("zig-v8");
+const uv = @import("zig-libuv");
 
 var loop: uv.Loop = undefined;
+var alloc: std.mem.Allocator = undefined;
+var isolate: v8.Isolate = undefined;
 
-const CallbackData = struct { callback: v8.Function };
-var global: v8.ObjectTemplate = undefined;
-var context: v8.Persistent(v8.Context) = undefined;
-// var cb: v8.Persistent(v8.Function) = undefined;
-// var persistentFt: v8.Persistent(v8.FunctionTemplate) = undefined;
+const Task = struct { timeout: u32, cb: v8.Function };
+var heap: std.PriorityQueue(Task, void, compare) = undefined;
 
-const Wrapper = struct {
+fn compare(_: void, a: Task, b: Task) std.math.Order {
+    if (a.timeout < b.timeout) {
+        return .lt;
+    } else {
+        return .gt;
+    }
+}
+
+const Print = struct {
     pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
         const info = v8.FunctionCallbackInfo.initFromV8(raw_info);
-        var hscope1: v8.HandleScope = undefined;
-        hscope1.init(info.getIsolate());
-        defer hscope1.deinit();
+
+        var hscope: v8.HandleScope = undefined;
+        hscope.init(info.getIsolate());
+        defer hscope.deinit();
 
         var data = info.getData().castTo(v8.String);
 
-        var s = info.getArg(0).toString(context.inner) catch unreachable;
+        var s = info.getArg(0).toString(info.getIsolate().getCurrentContext()) catch unreachable;
 
         const len = data.lenUtf8(info.getIsolate());
         var buf = std.heap.c_allocator.alloc(u8, len) catch unreachable;
@@ -27,48 +35,46 @@ const Wrapper = struct {
         _ = v8.String.writeUtf8(s, info.getIsolate(), buf);
 
         std.debug.print("{s}\n", .{buf});
+
+        var returnValue = info.getReturnValue();
+
+        returnValue.set(v8.Number.init(info.getIsolate(), 12));
     }
 };
 
-const Timeout = struct {
+const Timer = struct {
     pub fn callback(raw_info: ?*const v8.C_FunctionCallbackInfo) callconv(.C) void {
-        //std.debug.print("timeout call\n", .{});
-        const alloc = std.heap.c_allocator;
+        var info = v8.FunctionCallbackInfo.initFromV8(raw_info);
 
-        const info = v8.FunctionCallbackInfo.initFromV8(raw_info);
+        var cb = info.getArg(0).castTo(v8.Function);
+        var func = v8.Persistent(v8.Function).init(info.getIsolate(), cb);
+        var delay = info.getArg(1).toU32(info.getIsolate().getCurrentContext()) catch unreachable;
 
-        var cb1 = info.getArg(0).castTo(v8.Function);
-        var delay = info.getArg(1).toU32(context.inner) catch unreachable;
+        const handle = alloc.create(uv.c.uv_timer_t) catch unreachable;
 
-        var hscope1: v8.HandleScope = undefined;
-        hscope1.init(info.getIsolate());
-        defer hscope1.deinit();
+        heap.add(.{ .timeout = delay, .cb = func.inner }) catch unreachable;
 
-        var timer = uv.Timer.init(alloc, loop) catch unreachable;
+        _ = uv.c.uv_timer_init(loop.loop, handle);
+        _ = uv.c.uv_timer_start(handle, onComplete, delay, 0);
+    }
 
-        const cb = v8.Persistent(v8.Function).init(info.getIsolate(), cb1);
-
-        var dptr: CallbackData = .{ .callback = cb.inner };
-        timer.setData(&dptr);
-
-        timer.start((struct {
-            fn cbTimer(t: *uv.Timer) void {
-                var data: CallbackData = t.getData(CallbackData).?.*;
-                std.debug.print("before cb call", .{});
-
-                _ = data.callback.call(context.inner, context.inner.getGlobal().toValue(), &.{});
-            }
-        }).cbTimer, @intCast(delay), 0) catch unreachable;
+    pub fn onComplete(handle: [*c]uv.c.uv_timer_t) callconv(.C) void {
+        _ = handle;
+        var data: ?Task = heap.remove();
+        _ = data.?.cb.call(isolate.getCurrentContext(), isolate.getCurrentContext().getGlobal(), &.{});
     }
 };
 
 pub fn main() !void {
-    const alloc = std.heap.c_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    alloc = gpa.allocator();
 
     loop = try uv.Loop.init(alloc);
     defer loop.deinit(alloc);
 
-    const platform = v8.Platform.initDefault(0, true);
+    heap = std.PriorityQueue(Task, void, compare).init(alloc, {});
+
+    const platform = v8.Platform.initDefault(5, true);
     defer platform.deinit();
 
     std.log.info("v8 version: {s}\n", .{v8.getVersion()});
@@ -84,7 +90,7 @@ pub fn main() !void {
     params.array_buffer_allocator = v8.createDefaultArrayBufferAllocator();
     defer v8.destroyArrayBufferAllocator(params.array_buffer_allocator.?);
 
-    var isolate = v8.Isolate.init(&params);
+    isolate = v8.Isolate.init(&params);
     defer isolate.deinit();
 
     isolate.enter();
@@ -95,51 +101,30 @@ pub fn main() !void {
     hscope.init(isolate);
     defer hscope.deinit();
 
-    // const global_constructor = isolate.initFunctionTemplateDefault();
-    //var persistentFt: v8.Persistent(v8.FunctionTemplate) = v8.Persistent(v8.FunctionTemplate).init(isolate, global_constructor);
+    // ------------------
 
-    const window_class: v8.Persistent(v8.FunctionTemplate) = v8.Persistent(v8.FunctionTemplate).init(isolate, v8.FunctionTemplate.initDefault(isolate));
+    var global = v8.ObjectTemplate.initDefault(isolate);
 
-    const inst = window_class.inner.getInstanceTemplate();
-    inst.setInternalFieldCount(1);
+    global.set(v8.String.initUtf8(isolate, "print"), v8.FunctionTemplate.initCallbackData(isolate, Print.callback, isolate.initExternal(&.{})), v8.PropertyAttribute.None);
+    global.set(v8.String.initUtf8(isolate, "timeout"), v8.FunctionTemplate.initCallbackData(isolate, Timer.callback, isolate.initExternal(&.{})), v8.PropertyAttribute.None);
 
-    const proto = window_class.inner.getPrototypeTemplate();
-
-    // proto.set(v8.String.initUtf8(isolate, "print"), ft, v8.PropertyAttribute.ReadOnly);
-    // proto.set(v8.String.initUtf8(isolate, "timeout"), timeoutFunction, v8.PropertyAttribute.ReadOnly);
-
-    //var ft = persistentFt.inner.initCallbackData(isolate, Wrapper.callback, isolate.initExternal(&.{}));
-    var ft = v8.FunctionTemplate.initCallbackData(isolate, Wrapper.callback, isolate.initExternal(&.{}));
-    var ftp = v8.Persistent(v8.FunctionTemplate).init(isolate, ft);
-
-    var timeoutFunction = v8.FunctionTemplate.initCallbackData(isolate, Timeout.callback, isolate.initExternal(&.{}));
-    var timeoutFunctionPer = v8.Persistent(v8.FunctionTemplate).init(isolate, timeoutFunction);
-    //var timeoutFunction = persistentFt.inner.initCallbackData(isolate, Timeout.callback, isolate.initExternal(&.{}));
-
-    // global = v8.ObjectTemplate.init(isolate, global_constructor);
-
-    // global.set(v8.String.initUtf8(isolate, "print"), ft, v8.PropertyAttribute.ReadOnly);
-    // global.set(v8.String.initUtf8(isolate, "timeout"), timeoutFunction, v8.PropertyAttribute.ReadOnly);
-
-    proto.set(v8.String.initUtf8(isolate, "print"), ftp.inner, v8.PropertyAttribute.ReadOnly);
-    proto.set(v8.String.initUtf8(isolate, "timeout"), timeoutFunctionPer.inner, v8.PropertyAttribute.ReadOnly);
-
-    // Create a new context.
-    var c = isolate.initContext(proto, null);
-    context = v8.Persistent(v8.Context).init(isolate, c);
-    context.inner.enter();
-    defer context.inner.exit();
+    var context = v8.Context.init(isolate, global, null);
+    context.enter();
 
     // Create a string containing the JavaScript source code.
     const scriptString =
         \\function test() { 
-        \\      print('some'); 
+        \\      let printValue = print('some'); 
+        \\      print(printValue); 
         \\      timeout(function() {
-        \\          print('from timeout');
+        \\          print('from timeout 3000');
         \\          timeout(function() {
-        \\              print('from timeout 2');
-        \\          }, 3000);
-        \\      }, 2000);
+        \\              print('from timeout nested 2000');
+        \\          }, 2000);
+        \\      }, 3000);
+        \\      timeout(function() {
+        \\          print('from timeout 1000');
+        \\      }, 1000);
         \\};
         \\
         \\test();
@@ -157,39 +142,42 @@ pub fn main() !void {
         // \\  function(error) {print(error);}
         // \\);
         // \\
-        \\function resolveAfter() {
-        \\  return new Promise((resolve) => {
-        \\      resolve('resolved');
-        \\  });
-        \\}
+        // \\function resolveAfter() {
+        // \\  return new Promise((resolve) => {
+        // \\      resolve('resolved');
+        // \\  });
+        // \\}
         \\async function asyncCall() {
-        \\  print('calling');
+        \\  print('calling async js');
         \\  const result = await resolveAfter();
         \\  print(result);
         \\}
         \\asyncCall();
         \\
     ;
+    //----------------------------------------------------------
     const source = v8.String.initUtf8(isolate, scriptString);
+    var scriptName = v8.String.initUtf8(isolate, "test_script");
+    var origin = v8.ScriptOrigin.init(isolate, scriptName.toValue(), 0, 0, false, 0, null, false, false, false, null);
+    var script = try v8.Script.compile(context, source, origin);
 
-    // Compile the source code.
-    const script = try v8.Script.compile(context.inner, source, null);
-
-    // Run the script to get the result.
-    _ = try script.run(context.inner);
+    _ = try script.run(context);
 
     // Convert the result to an UTF8 string and print it.
     //const res = valueToRawUtf8Alloc(std.heap.c_allocator, isolate, context, value);
 
-    //std.debug.print("{s}\n", .{res});
+    // std.debug.print("{s}\n", .{"await loop"});
+    // try loop.run(.until_done);
+    // std.debug.print("{s}\n", .{"done loop"});
 
+    // try loop.run(.until_done);
     try loop.run(.default);
 }
 
-pub fn valueToRawUtf8Alloc(alloc: std.mem.Allocator, isolate: v8.Isolate, ctx: v8.Context, val: v8.Value) []const u8 {
-    const str = val.toString(ctx) catch unreachable;
-    const len = str.lenUtf8(isolate);
-    const buf = alloc.alloc(u8, len) catch unreachable;
-    _ = str.writeUtf8(isolate, buf);
-    return buf;
-}
+// pub fn valueToRawUtf8Alloc(alloc1: std.mem.Allocator, isolate: v8.Isolate, ctx: v8.Context, val: v8.Value) []const u8 {
+//     const str = val.toString(ctx) catch unreachable;
+//     const len = str.lenUtf8(isolate);
+//     const buf = alloc1.alloc(u8, len) catch unreachable;
+//     _ = str.writeUtf8(isolate, buf);
+//     return buf;
+// }
