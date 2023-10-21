@@ -77,7 +77,29 @@ pub fn main() !void {
     const platform = v8.Platform.initDefault(5, true);
     defer platform.deinit();
 
-    std.log.info("v8 version: {s}\n", .{v8.getVersion()});
+    // ---------------------------------------------------
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+
+    var maybeJsMainFile: []const u8 = undefined;
+
+    if (args.len < 2) {
+        std.debug.print("{s}\n", .{"Extected path to the main file"});
+        return;
+    }
+
+    maybeJsMainFile = args[1];
+    // ---------------------------------------------------
+
+    // ---------------------------------------------------
+    const pathToMainJsFile = try std.fs.path.resolve(alloc, &.{maybeJsMainFile});
+    defer alloc.free(pathToMainJsFile);
+
+    const mainScriptSrc = try std.fs.cwd().readFileAlloc(alloc, pathToMainJsFile, 1e9);
+    defer alloc.free(mainScriptSrc);
+    // ---------------------------------------------------
+
+    std.log.info("\nv8 version: {s}\n", .{v8.getVersion()});
 
     v8.initV8Platform(platform);
     v8.initV8();
@@ -111,73 +133,13 @@ pub fn main() !void {
     var context = v8.Context.init(isolate, global, null);
     context.enter();
 
-    // Create a string containing the JavaScript source code.
-    const scriptString =
-        \\function test() { 
-        \\      let printValue = print('some'); 
-        \\      print(printValue); 
-        \\      timeout(function() {
-        \\          print('from timeout 3000');
-        \\          timeout(function() {
-        \\              print('from timeout nested 2000');
-        \\          }, 2000);
-        \\      }, 3000);
-        \\      timeout(function() {
-        \\          print('from timeout 1000');
-        \\      }, 1000);
-        \\};
-        \\
-        \\test();
-        // \\let myPromise = new Promise(function(myResolve, myReject) {
-        // \\  let x = 1;
-        // \\ if (x == 0) {
-        // \\myResolve("OK");
-        // \\} else {
-        // \\myReject("Error");
-        // \\}
-        // \\});
-        // \\
-        // \\myPromise.then(
-        // \\  function(value) {print(value);},
-        // \\  function(error) {print(error);}
-        // \\);
-        // \\
-        // \\function resolveAfter() {
-        // \\  return new Promise((resolve) => {
-        // \\      resolve('resolved');
-        // \\  });
-        // \\}
-        \\async function asyncCall() {
-        \\  print('calling async js');
-        \\  const result = await resolveAfter();
-        \\  print(result);
-        \\}
-        \\asyncCall();
-        \\
-    ;
     //----------------------------------------------------------
-    const source = v8.String.initUtf8(isolate, scriptString);
-    var scriptName = v8.String.initUtf8(isolate, "test_script");
+    const source = v8.String.initUtf8(isolate, mainScriptSrc);
+    var scriptName = v8.String.initUtf8(isolate, maybeJsMainFile);
     var origin = v8.ScriptOrigin.init(isolate, scriptName.toValue(), 0, 0, false, 0, null, false, false, false, null);
     var script = try v8.Script.compile(context, source, origin);
 
     _ = try script.run(context);
 
-    // Convert the result to an UTF8 string and print it.
-    //const res = valueToRawUtf8Alloc(std.heap.c_allocator, isolate, context, value);
-
-    // std.debug.print("{s}\n", .{"await loop"});
-    // try loop.run(.until_done);
-    // std.debug.print("{s}\n", .{"done loop"});
-
-    // try loop.run(.until_done);
     try loop.run(.default);
 }
-
-// pub fn valueToRawUtf8Alloc(alloc1: std.mem.Allocator, isolate: v8.Isolate, ctx: v8.Context, val: v8.Value) []const u8 {
-//     const str = val.toString(ctx) catch unreachable;
-//     const len = str.lenUtf8(isolate);
-//     const buf = alloc1.alloc(u8, len) catch unreachable;
-//     _ = str.writeUtf8(isolate, buf);
-//     return buf;
-// }
